@@ -602,7 +602,10 @@ class InstagramReelsScraper:
             
             time.sleep(2)
             
-            # Try multiple caption selectors
+            # Get username from URL for filtering
+            username = reel_url.split('/')[-3] if len(reel_url.split('/')) > 3 else ""
+            
+            # Try multiple caption selectors with improved logic
             caption_selectors = [
                 "h1",  # Main caption
                 "div._a9zs span",  # Alternative caption
@@ -611,27 +614,173 @@ class InstagramReelsScraper:
                 "div[data-testid='post-comment-root'] span",  # Comment root
                 "div._ac7v span[dir='auto']",  # Another variant
                 "div._aacl._aaco._aacu._aacx._aada span",  # Specific Instagram classes
+                "div[role='button'] + div span",  # Caption next to buttons
+                "div[data-testid] span[dir='auto']",  # Data testid variants
+                "meta[property='og:description']",  # Meta description fallback
             ]
             
-            caption = ""
+            candidate_captions = []
+            
+            # Collect all potential captions
             for selector in caption_selectors:
                 try:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    for element in elements:
-                        text = element.text.strip()
-                        if text and len(text) > 10:  # Assume caption is longer than 10 chars
-                            caption = text
-                            break
-                    if caption:
-                        break
+                    if selector.startswith("meta"):
+                        # Handle meta tags differently
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                        for element in elements:
+                            content = element.get_attribute("content")
+                            if content and len(content) > 20:
+                                candidate_captions.append(content.strip())
+                    else:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                        for element in elements:
+                            text = element.text.strip()
+                            if text and len(text) > 15:  # Increased minimum length
+                                candidate_captions.append(text)
                 except:
                     continue
+            
+            # Score and select the best caption
+            best_caption = ""
+            best_score = 0
+            
+            # Debug: Log all candidate captions for troubleshooting
+            logger.debug(f"Found {len(candidate_captions)} potential captions")
+            for i, caption in enumerate(candidate_captions):
+                logger.debug(f"Caption {i+1}: {caption[:100]}...")
+            
+            for caption in candidate_captions:
+                if not caption:
+                    continue
+                    
+                score = 0
+                caption_lower = caption.lower()
+                
+                # Skip if it's just the username
+                if caption.strip().lower() == username.lower():
+                    continue
+                
+                # Skip if it's a short generic text
+                if len(caption) < 20:
+                    continue
+                
+                # UNIVERSAL Positive scoring criteria
+                if len(caption) > 100:
+                    score += 5  # Very long text is highly likely to be caption
+                elif len(caption) > 50:
+                    score += 3  # Longer text is more likely to be caption
+                
+                if '#' in caption:
+                    score += 3  # Contains hashtags (universal sign of captions)
+                
+                # Universal emoji detection (any emoji suggests it's content, not UI)
+                import re
+                emoji_pattern = re.compile("["
+                    u"\U0001F600-\U0001F64F"  # emoticons
+                    u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+                    u"\U0001F680-\U0001F6FF"  # transport & map symbols
+                    u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                    u"\U00002702-\U000027B0"
+                    u"\U000024C2-\U0001F251"
+                    "]+", flags=re.UNICODE)
+                if emoji_pattern.search(caption):
+                    score += 2  # Contains emojis
+                
+                # Multiple sentences or line breaks indicate real content
+                if '\n' in caption or '. ' in caption or '! ' in caption or '? ' in caption:
+                    score += 3  # Multiple sentences or line breaks
+                
+                # Check if it contains multiple words (real content vs UI elements)
+                word_count = len(caption.split())
+                if word_count >= 10:
+                    score += 3  # Many words = likely caption
+                elif word_count >= 5:
+                    score += 2  # Some words = possible caption
+                elif word_count >= 3:
+                    score += 1  # Few words = maybe caption
+                
+                # URLs or mentions suggest real content
+                if 'http' in caption_lower or '@' in caption or '.' in caption:
+                    score += 1  # Contains links or mentions
+                
+                # Punctuation patterns of real content
+                punctuation_count = sum(1 for char in caption if char in '.,!?;:')
+                if punctuation_count >= 3:
+                    score += 2  # Good punctuation suggests real content
+                elif punctuation_count >= 1:
+                    score += 1
+                
+                # UNIVERSAL Negative scoring criteria
+                
+                # Common UI elements and generic text
+                ui_elements = [
+                    'follow', 'following', 'followers', 'likes', 'like', 'share', 'comment',
+                    'view', 'views', 'watch', 'play', 'pause', 'volume', 'mute',
+                    'close', 'back', 'next', 'previous', 'settings', 'options'
+                ]
+                if any(ui_word == caption_lower.strip() for ui_word in ui_elements):
+                    score -= 10  # Definitely UI element, not caption
+                
+                # Single word is very unlikely to be caption (unless it's long)
+                if len(caption.split()) == 1 and len(caption) < 15:
+                    score -= 5  # Single short word is unlikely to be caption
+                
+                # Username repetition check (more thorough)
+                if caption.lower().strip() == username.lower():
+                    score -= 10  # Exact username match
+                
+                # If it's mostly numbers or very short, probably not caption
+                if re.match(r'^[\d\s,\.]+$', caption.strip()):
+                    score -= 8  # Just numbers (like view counts)
+                
+                # Common social media UI text
+                common_ui_phrases = [
+                    'suggested for you', 'recommended', 'sponsored', 'advertisement',
+                    'see more', 'see less', 'show more', 'show less', 'read more'
+                ]
+                if any(phrase in caption_lower for phrase in common_ui_phrases):
+                    score -= 8  # UI phrases
+                
+                # Log scoring for debugging
+                logger.debug(f"Caption: '{caption[:50]}...' -> Score: {score}")
+                
+                # Select best scoring caption
+                if score > best_score:
+                    best_score = score
+                    best_caption = caption
+            
+            logger.info(f"Best caption selected with score: {best_score}")
+            
+            # If no good caption found, try a broader search
+            if not best_caption:
+                try:
+                    logger.info("No good caption found, trying broader search...")
+                    # Look for any longer text that might be the caption
+                    all_spans = self.driver.find_elements(By.TAG_NAME, "span")
+                    for span in all_spans:
+                        text = span.text.strip()
+                        if (len(text) > 50 and  # Reduced threshold
+                            text.lower() != username.lower() and
+                            len(text.split()) > 3 and  # Must have multiple words
+                            not re.match(r'^[\d\s,\.]+$', text)):  # Not just numbers
+                            # Additional check: prefer text with hashtags or emojis
+                            if '#' in text or emoji_pattern.search(text):
+                                best_caption = text
+                                logger.info(f"Found caption via broader search: {text[:50]}...")
+                                break
+                            # If no emoji/hashtag, still consider if it's long enough
+                            elif len(text) > 100:
+                                best_caption = text
+                                logger.info(f"Found long caption via broader search: {text[:50]}...")
+                                break
+                except Exception as e:
+                    logger.warning(f"Error in broader search: {e}")
             
             # Close tab and switch back to main window
             self.driver.close()
             self.driver.switch_to.window(main_window)
             
-            return caption[:2500]  # Limit caption length
+            return best_caption[:2500] if best_caption else ""  # Limit caption length
             
         except Exception as e:
             logger.warning(f"❌ Failed to extract caption from {reel_url}: {e}")
